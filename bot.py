@@ -99,7 +99,9 @@ def init_db():
     FEEDBACK_TEXT,
     BROADCAST_TEXT,
     REPLY_TO_USER,
-) = range(12)
+    BULK_SONG_TITLE, BULK_SONG_FILES,
+    BULK_BOOK_TITLE, BULK_BOOK_FILES,
+) = range(16)
 
 # ─── Main menu ─────────────────────────────────────────────────────────────────
 
@@ -273,9 +275,10 @@ async def menu_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 ADMIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        ["➕ መዝሙር ጨምር", "➕ Book ጨምር"],
-        ["➕ ግጥም ጨምር",   "➕ Hall ልጥፍ ጨምር"],
-        ["📋 Feedbacks ይመልከቱ", "📢 Broadcast"],
+        ["➕ መዝሙር ጨምር",      "➕ Book ጨምር"],
+        ["📦 Bulk መዝሙር ጨምር", "📦 Bulk Books ጨምር"],
+        ["➕ ግጥም ጨምር",       "➕ Hall ልጥፍ ጨምር"],
+        ["📋 Feedbacks ይመልከቱ","📢 Broadcast"],
         ["🔙 ወደ ዋና ምናሌ"],
     ],
     resize_keyboard=True
@@ -298,6 +301,18 @@ async def admin_menu_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif text == "➕ Book ጨምር":
         await update.message.reply_text("📖 የመጽሐፉን ስም ያስፍሩ:")
         return ADD_BOOK_TITLE
+    elif text == "📦 Bulk መዝሙር ጨምር":
+        await update.message.reply_text(
+            "📦 Bulk መዝሙር — መጀመሪያ ርዕስ/prefix ያስፍሩ:\n"
+            "(ለምሳሌ: 'ምስጋና' ካሉ → ምስጋና 1, ምስጋና 2, ... ይሆናል)"
+        )
+        return BULK_SONG_TITLE
+    elif text == "📦 Bulk Books ጨምር":
+        await update.message.reply_text(
+            "📦 Bulk Books — መጀመሪያ ርዕስ/prefix ያስፍሩ:\n"
+            "(ለምሳሌ: 'መጽሐፍ' ካሉ → መጽሐፍ 1, መጽሐፍ 2, ... ይሆናል)"
+        )
+        return BULK_BOOK_TITLE
     elif text == "➕ ግጥም ጨምር":
         await update.message.reply_text("📝 የግጥሙን ስም ያስፍሩ:")
         return ADD_LYRIC_TITLE
@@ -322,6 +337,92 @@ async def admin_menu_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ዋና ምናሌ:", reply_markup=MAIN_MENU)
         return ConversationHandler.END
     return ADMIN_MENU
+
+
+# ── Bulk songs ────────────────────────────────────────────────────────────────
+
+async def bulk_song_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["bulk_song_prefix"] = update.message.text.strip()
+    ctx.user_data["bulk_song_count"] = 0
+    await update.message.reply_text(
+        f"✅ Prefix: '{ctx.user_data['bulk_song_prefix']}'\n\n"
+        "አሁን ሁሉንም የድምፅ ፋይሎች ይላኩ (ምንም ያህል).\n"
+        "ሲጨርሱ /done ይላኩ።"
+    )
+    return BULK_SONG_FILES
+
+async def bulk_song_files(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # /done ends the bulk session
+    if update.message.text and update.message.text.strip() == "/done":
+        count = ctx.user_data.get("bulk_song_count", 0)
+        await update.message.reply_text(
+            f"✅ {count} መዝሙሮች ተጨምረዋል!", reply_markup=ADMIN_KEYBOARD
+        )
+        return ADMIN_MENU
+
+    if not update.message.audio and not update.message.voice:
+        await update.message.reply_text("⚠️ ድምፅ ፋይል ይላኩ ወይም /done ይፃፉ።")
+        return BULK_SONG_FILES
+
+    fid = (update.message.audio or update.message.voice).file_id
+    prefix = ctx.user_data.get("bulk_song_prefix", "መዝሙር")
+    # Use the original filename as title if available, else prefix + number
+    orig_name = ""
+    if update.message.audio and update.message.audio.file_name:
+        orig_name = os.path.splitext(update.message.audio.file_name)[0].strip()
+    if not orig_name:
+        ctx.user_data["bulk_song_count"] = ctx.user_data.get("bulk_song_count", 0) + 1
+        orig_name = f"{prefix} {ctx.user_data['bulk_song_count']}"
+    else:
+        ctx.user_data["bulk_song_count"] = ctx.user_data.get("bulk_song_count", 0) + 1
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO songs (title, file_id) VALUES (%s, %s)", (orig_name, fid))
+        conn.commit()
+    await update.message.reply_text(f"✅ '{orig_name}' ተጨምሯል — ቀጥሉ ወይም /done ይፃፉ።")
+    return BULK_SONG_FILES
+
+
+# ── Bulk books ────────────────────────────────────────────────────────────────
+
+async def bulk_book_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["bulk_book_prefix"] = update.message.text.strip()
+    ctx.user_data["bulk_book_count"] = 0
+    await update.message.reply_text(
+        f"✅ Prefix: '{ctx.user_data['bulk_book_prefix']}'\n\n"
+        "አሁን ሁሉንም PDF ፋይሎች ይላኩ (ምንም ያህል).\n"
+        "ሲጨርሱ /done ይላኩ።"
+    )
+    return BULK_BOOK_FILES
+
+async def bulk_book_files(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.message.text and update.message.text.strip() == "/done":
+        count = ctx.user_data.get("bulk_book_count", 0)
+        await update.message.reply_text(
+            f"✅ {count} መጽሐፍቶች ተጨምረዋል!", reply_markup=ADMIN_KEYBOARD
+        )
+        return ADMIN_MENU
+
+    if not update.message.document:
+        await update.message.reply_text("⚠️ ሰነድ ፋይል ይላኩ ወይም /done ይፃፉ።")
+        return BULK_BOOK_FILES
+
+    fid = update.message.document.file_id
+    prefix = ctx.user_data.get("bulk_book_prefix", "መጽሐፍ")
+    orig_name = ""
+    if update.message.document.file_name:
+        orig_name = os.path.splitext(update.message.document.file_name)[0].strip()
+    if not orig_name:
+        ctx.user_data["bulk_book_count"] = ctx.user_data.get("bulk_book_count", 0) + 1
+        orig_name = f"{prefix} {ctx.user_data['bulk_book_count']}"
+    else:
+        ctx.user_data["bulk_book_count"] = ctx.user_data.get("bulk_book_count", 0) + 1
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO books (title, file_id) VALUES (%s, %s)", (orig_name, fid))
+        conn.commit()
+    await update.message.reply_text(f"✅ '{orig_name}' ተጨምሯል — ቀጥሉ ወይም /done ይፃፉ።")
+    return BULK_BOOK_FILES
 
 
 # Add song
@@ -527,6 +628,16 @@ async def run():
             ADD_HALL_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_hall_caption)],
             ADD_HALL_MEDIA:   [MessageHandler(filters.PHOTO | filters.VIDEO | filters.TEXT, add_hall_media)],
             BROADCAST_TEXT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_text)],
+            BULK_SONG_TITLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_song_title)],
+            BULK_SONG_FILES:  [
+                MessageHandler(filters.AUDIO | filters.VOICE, bulk_song_files),
+                CommandHandler("done", bulk_song_files),
+            ],
+            BULK_BOOK_TITLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_book_title)],
+            BULK_BOOK_FILES:  [
+                MessageHandler(filters.Document.ALL, bulk_book_files),
+                CommandHandler("done", bulk_book_files),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
