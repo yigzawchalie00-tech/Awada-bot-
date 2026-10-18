@@ -1,597 +1,547 @@
 """
-Awada Bot — Full Amharic Telegram Bot
-Admin ID: 1766103612
-Features: መዝሙር, Books, የመዝሙር ግጥሞች, አዳራሻችን, አስተያየት, Help
-Includes HTTP ping server to stay alive on Render free tier
+Awada Church Telegram Bot
+Amharic-language bot for church content (songs, books, lyrics, hall info, feedback).
+Admin panel at /admin.
+Runs on Render free tier (web service) using aiohttp for the HTTP port + python-telegram-bot.
 """
 
-import os
 import asyncio
-import threading
+import os
+import logging
+from aiohttp import web
+from dotenv import load_dotenv
 import psycopg
-from psycopg.rows import dict_row
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import (
-    Update, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton
 )
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ConversationHandler, ContextTypes,
-    filters
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ConversationHandler, ContextTypes, filters
 )
-from dotenv import load_dotenv
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+ADMIN_ID  = int(os.environ.get("ADMIN_ID", "1766103612"))
 DATABASE_URL = os.environ["DATABASE_URL"]
-ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "1766103612").split(",")]
 
-# ─── States ────────────────────────────────────────────────────────────────
-(
-    MAIN_MENU,
-    FEEDBACK_TEXT,
-    ADMIN_MENU,
-    ADMIN_ADD_SONG,
-    ADMIN_ADD_SONG_AUDIO,
-    ADMIN_ADD_BOOK,
-    ADMIN_ADD_BOOK_FILE,
-    ADMIN_ADD_LYRICS,
-    ADMIN_ADD_LYRICS_PHOTO,
-    ADMIN_ADD_HALL,
-    ADMIN_REPLY_FEEDBACK,
-    ADMIN_BROADCAST,
-) = range(12)
+# ─── DB helpers ───────────────────────────────────────────────────────────────
 
-# ─── Keyboards ─────────────────────────────────────────────────────────────
-
-def main_keyboard():
-    return ReplyKeyboardMarkup([
-        ["🎵 መዝሙር", "📖 Books"],
-        ["📝 የመዝሙር ግጥሞች", "🏛 አዳራሻችን"],
-        ["💬 አስተያየት", "❓ Help"],
-    ], resize_keyboard=True)
-
-
-def admin_keyboard():
-    return ReplyKeyboardMarkup([
-        ["➕ መዝሙር ጨምር", "➕ Book ጨምር"],
-        ["➕ ግጥም ጨምር", "➕ አዳራሻ ጨምር"],
-        ["📨 ለሁሉም ላክ", "📋 አስተያየቶች"],
-        ["🔙 ወደ ዋና ምናሌ"],
-    ], resize_keyboard=True)
-
-
-def back_keyboard():
-    return ReplyKeyboardMarkup([["🔙 ተመለስ"]], resize_keyboard=True)
-
-
-# ─── Database ──────────────────────────────────────────────────────────────
-
-def get_db():
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
-
+def get_conn():
+    return psycopg.connect(DATABASE_URL)
 
 def init_db():
-    with get_db() as conn:
+    with get_conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id         BIGINT PRIMARY KEY,
-                username   TEXT,
+                id BIGINT PRIMARY KEY,
+                username TEXT,
                 first_name TEXT,
-                joined_at  TIMESTAMP DEFAULT NOW()
+                joined_at TIMESTAMP DEFAULT NOW()
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS songs (
-                id         SERIAL PRIMARY KEY,
-                title      TEXT NOT NULL,
-                file_id    TEXT NOT NULL,
-                added_at   TIMESTAMP DEFAULT NOW()
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT NOW()
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS books (
-                id         SERIAL PRIMARY KEY,
-                title      TEXT NOT NULL,
-                file_id    TEXT NOT NULL,
-                added_at   TIMESTAMP DEFAULT NOW()
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT NOW()
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS lyrics (
-                id         SERIAL PRIMARY KEY,
-                title      TEXT NOT NULL,
-                file_id    TEXT NOT NULL,
-                added_at   TIMESTAMP DEFAULT NOW()
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT NOW()
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS hall_posts (
-                id         SERIAL PRIMARY KEY,
-                caption    TEXT,
-                file_id    TEXT,
-                file_type  TEXT,
-                content    TEXT,
-                added_at   TIMESTAMP DEFAULT NOW()
+                id SERIAL PRIMARY KEY,
+                caption TEXT,
+                media_type TEXT,
+                file_id TEXT,
+                added_at TIMESTAMP DEFAULT NOW()
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS feedback (
-                id          SERIAL PRIMARY KEY,
-                user_id     BIGINT NOT NULL,
-                username    TEXT,
-                first_name  TEXT,
-                message     TEXT NOT NULL,
-                replied     BOOLEAN DEFAULT FALSE,
-                sent_at     TIMESTAMP DEFAULT NOW()
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                username TEXT,
+                message TEXT,
+                sent_at TIMESTAMP DEFAULT NOW()
             )
         """)
         conn.commit()
-    print("[db] Database initialized.")
+
+# ─── Conversation states ───────────────────────────────────────────────────────
+
+(
+    ADMIN_MENU,
+    ADD_SONG_TITLE, ADD_SONG_FILE,
+    ADD_BOOK_TITLE, ADD_BOOK_FILE,
+    ADD_LYRIC_TITLE, ADD_LYRIC_FILE,
+    ADD_HALL_CAPTION, ADD_HALL_MEDIA,
+    FEEDBACK_TEXT,
+    BROADCAST_TEXT,
+    REPLY_TO_USER,
+) = range(12)
+
+# ─── Main menu ─────────────────────────────────────────────────────────────────
+
+MAIN_MENU = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("🎵 መዝሙር"),  KeyboardButton("📖 Books")],
+        [KeyboardButton("📝 የመዝሙር ግጥሞች"), KeyboardButton("🏛 አዳራሻችን")],
+        [KeyboardButton("💬 አስተያየት"), KeyboardButton("❓ Help")],
+    ],
+    resize_keyboard=True
+)
 
 
 def register_user(user):
-    with get_db() as conn:
-        conn.execute("""
-            INSERT INTO users (id, username, first_name)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-            username=EXCLUDED.username, first_name=EXCLUDED.first_name
-        """, (user.id, user.username, user.first_name))
-        conn.commit()
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                """INSERT INTO users (id, username, first_name)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (id) DO UPDATE
+                   SET username=EXCLUDED.username, first_name=EXCLUDED.first_name""",
+                (user.id, user.username, user.first_name)
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"register_user failed: {e}")
 
 
-# ─── HTTP Keep-alive server ─────────────────────────────────────────────────
+# ─── /start ────────────────────────────────────────────────────────────────────
 
-class PingHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Awada Bot is running!")
-
-    def log_message(self, format, *args):
-        pass
-
-
-def start_ping_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), PingHandler)
-    print(f"[ping] HTTP server on port {port}")
-    server.serve_forever()
-
-
-# ─── Helpers ───────────────────────────────────────────────────────────────
-
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-
-# ─── Start ─────────────────────────────────────────────────────────────────
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
-    name = update.effective_user.first_name or "እንኳን ደህና መጡ"
     await update.message.reply_text(
-        f"ሰላም {name}! 👋\nወደ አዋዳ ቤተ ክርስቲያን ቦቱ እንኳን ደህና መጡ።\nከታች ካሉት ምናሌዎች ይምረጡ።",
-        reply_markup=main_keyboard()
+        "🙏 እንኳን ደህና መጡ!\nወደ አዋዳ ቤተ ክርስቲያን ቴሌግራም ቦት\n\nከዚህ በታች ካሉት ምርጫዎች ይምረጡ:",
+        reply_markup=MAIN_MENU
     )
-    return MAIN_MENU
 
 
-# ─── Main Menu Handler ─────────────────────────────────────────────────────
+# ─── 🎵 Songs ──────────────────────────────────────────────────────────────────
 
-async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.effective_user.id
-    register_user(update.effective_user)
-
-    if text == "🎵 መዝሙር":
-        return await show_songs(update, context)
-    elif text == "📖 Books":
-        return await show_books(update, context)
-    elif text == "📝 የመዝሙር ግጥሞች":
-        return await show_lyrics(update, context)
-    elif text == "🏛 አዳራሻችን":
-        return await show_hall(update, context)
-    elif text == "💬 አስተያየት":
-        await update.message.reply_text(
-            "💬 አስተያየትዎን ይፃፉ:\n(ወደ ኋላ ለመመለስ 🔙 ተመለስ ይጫኑ)",
-            reply_markup=back_keyboard()
-        )
-        return FEEDBACK_TEXT
-    elif text == "❓ Help":
-        await update.message.reply_text(
-            "❓ *እርዳታ*\n\n"
-            "🎵 *መዝሙር* — የቤተ ክርስቲያን መዝሙሮችን ያዳምጡ\n"
-            "📖 *Books* — መጻሕፍትን ያንብቡ\n"
-            "📝 *የመዝሙር ግጥሞች* — የመዝሙር ግጥሞችን ይመልከቱ\n"
-            "🏛 *አዳራሻችን* — ስለ አዳራሻችን መረጃ\n"
-            "💬 *አስተያየት* — አስተያየትዎን ያካፍሉ\n\n"
-            "ለተጨማሪ መረጃ ወደ አስተዳዳሪ ይደርሱ።",
-            parse_mode="Markdown",
-            reply_markup=main_keyboard()
-        )
-        return MAIN_MENU
-
-    return MAIN_MENU
+async def menu_songs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, title FROM songs ORDER BY id DESC LIMIT 20").fetchall()
+    if not rows:
+        await update.message.reply_text("🎵 ምንም መዝሙር አልተጨመረም።")
+        return
+    buttons = [[InlineKeyboardButton(r[1], callback_data=f"song:{r[0]}")] for r in rows]
+    await update.message.reply_text("🎵 መዝሙሮች:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
-# ─── Songs ─────────────────────────────────────────────────────────────────
-
-async def show_songs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_db() as conn:
-        songs = conn.execute("SELECT * FROM songs ORDER BY added_at DESC").fetchall()
-    if not songs:
-        await update.message.reply_text("😔 እስካሁን ምንም መዝሙር አልተጨመረም።", reply_markup=main_keyboard())
-        return MAIN_MENU
-    await update.message.reply_text(f"🎵 *{len(songs)} መዝሙሮች አሉ:*", parse_mode="Markdown")
-    for song in songs:
-        await update.message.reply_audio(audio=song["file_id"], title=song["title"], caption=f"🎵 {song['title']}")
-    await update.message.reply_text("ሌላ ለማዳመጥ ከዋና ምናሌ ይምረጡ።", reply_markup=main_keyboard())
-    return MAIN_MENU
-
-
-# ─── Books ─────────────────────────────────────────────────────────────────
-
-async def show_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_db() as conn:
-        books = conn.execute("SELECT * FROM books ORDER BY added_at DESC").fetchall()
-    if not books:
-        await update.message.reply_text("😔 እስካሁን ምንም መጽሐፍ አልተጨመረም።", reply_markup=main_keyboard())
-        return MAIN_MENU
-    await update.message.reply_text(f"📖 *{len(books)} መጻሕፍት አሉ:*", parse_mode="Markdown")
-    for book in books:
-        await update.message.reply_document(document=book["file_id"], caption=f"📖 {book['title']}")
-    await update.message.reply_text("ሌላ ለማንበብ ከዋና ምናሌ ይምረጡ።", reply_markup=main_keyboard())
-    return MAIN_MENU
-
-
-# ─── Lyrics ────────────────────────────────────────────────────────────────
-
-async def show_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_db() as conn:
-        lyrics = conn.execute("SELECT * FROM lyrics ORDER BY added_at DESC").fetchall()
-    if not lyrics:
-        await update.message.reply_text("😔 እስካሁን ምንም ግጥም አልተጨመረም።", reply_markup=main_keyboard())
-        return MAIN_MENU
-    await update.message.reply_text(f"📝 *{len(lyrics)} ግጥሞች አሉ:*", parse_mode="Markdown")
-    for lyric in lyrics:
-        await update.message.reply_photo(photo=lyric["file_id"], caption=f"📝 {lyric['title']}")
-    await update.message.reply_text("ሌላ ለማየት ከዋና ምናሌ ይምረጡ።", reply_markup=main_keyboard())
-    return MAIN_MENU
-
-
-# ─── Hall ──────────────────────────────────────────────────────────────────
-
-async def show_hall(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_db() as conn:
-        posts = conn.execute("SELECT * FROM hall_posts ORDER BY added_at DESC LIMIT 10").fetchall()
-    if not posts:
-        await update.message.reply_text("😔 እስካሁን ምንም መረጃ አልተጨመረም።", reply_markup=main_keyboard())
-        return MAIN_MENU
-    await update.message.reply_text("🏛 *አዳራሻችን:*", parse_mode="Markdown")
-    for post in posts:
-        try:
-            if post["file_type"] == "photo" and post["file_id"]:
-                await update.message.reply_photo(photo=post["file_id"], caption=post["caption"] or "")
-            elif post["file_type"] == "video" and post["file_id"]:
-                await update.message.reply_video(video=post["file_id"], caption=post["caption"] or "")
-            elif post["content"]:
-                await update.message.reply_text(post["content"])
-        except Exception as e:
-            print(f"[hall] Error: {e}")
-    await update.message.reply_text("ለተጨማሪ መረጃ ያግኙን።", reply_markup=main_keyboard())
-    return MAIN_MENU
-
-
-# ─── Feedback ──────────────────────────────────────────────────────────────
-
-async def feedback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user = update.effective_user
-    if text == "🔙 ተመለስ":
-        await update.message.reply_text("ወደ ዋና ምናሌ ተመልሰዋል።", reply_markup=main_keyboard())
-        return MAIN_MENU
-    with get_db() as conn:
-        conn.execute(
-            "INSERT INTO feedback (user_id, username, first_name, message) VALUES (%s, %s, %s, %s)",
-            (user.id, user.username, user.first_name, text)
-        )
-        conn.commit()
-        result = conn.execute(
-            "SELECT id FROM feedback WHERE user_id=%s ORDER BY sent_at DESC LIMIT 1", (user.id,)
-        ).fetchone()
-        feedback_id = result["id"] if result else 0
-
-    username_str = f"@{user.username}" if user.username else "ምንም username የለም"
-    admin_msg = (
-        f"📨 *አዲስ አስተያየት!*\n\n"
-        f"👤 ስም: {user.first_name}\n"
-        f"🔗 Username: {username_str}\n"
-        f"🆔 ID: `{user.id}`\n\n"
-        f"💬 መልእክት:\n{text}"
-    )
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("↩️ መልስ ላክ", callback_data=f"reply_{feedback_id}_{user.id}")]
-    ])
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode="Markdown", reply_markup=keyboard)
-        except Exception as e:
-            print(f"[feedback] Could not notify admin {admin_id}: {e}")
-    await update.message.reply_text("✅ አስተያየትዎ ተልኳል! ለምላሽ ትንሽ ይጠብቁ።", reply_markup=main_keyboard())
-    return MAIN_MENU
-
-
-# ─── Admin Reply ───────────────────────────────────────────────────────────
-
-async def admin_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cb_song(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not is_admin(query.from_user.id):
+    song_id = int(query.data.split(":")[1])
+    with get_conn() as conn:
+        row = conn.execute("SELECT title, file_id FROM songs WHERE id=%s", (song_id,)).fetchone()
+    if row:
+        await query.message.reply_audio(audio=row[1], title=row[0])
+
+
+# ─── 📖 Books ──────────────────────────────────────────────────────────────────
+
+async def menu_books(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, title FROM books ORDER BY id DESC LIMIT 20").fetchall()
+    if not rows:
+        await update.message.reply_text("📖 ምንም መጽሐፍ አልተጨመረም።")
         return
-    parts = query.data.split("_")
-    feedback_id = parts[1]
-    user_id = int(parts[2])
-    context.user_data["reply_to_user_id"] = user_id
-    context.user_data["reply_to_feedback_id"] = feedback_id
-    await query.message.reply_text(f"↩️ ለ ID {user_id} መልስ ይፃፉ:", reply_markup=back_keyboard())
-    return ADMIN_REPLY_FEEDBACK
+    buttons = [[InlineKeyboardButton(r[1], callback_data=f"book:{r[0]}")] for r in rows]
+    await update.message.reply_text("📖 መጽሐፍቶች:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
-async def admin_send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == "🔙 ተመለስ":
-        await update.message.reply_text("ተሰርዟል።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    user_id = context.user_data.get("reply_to_user_id")
-    feedback_id = context.user_data.get("reply_to_feedback_id")
-    if not user_id:
-        await update.message.reply_text("ስህተት።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    try:
-        await context.bot.send_message(chat_id=user_id, text=f"📩 *ከአስተዳዳሪ መልስ:*\n\n{text}", parse_mode="Markdown")
-        with get_db() as conn:
-            conn.execute("UPDATE feedback SET replied=TRUE WHERE id=%s", (feedback_id,))
-            conn.commit()
-        await update.message.reply_text("✅ መልሱ ተልኳል!", reply_markup=admin_keyboard())
-    except Exception as e:
-        await update.message.reply_text(f"❌ አልተሳካም: {e}", reply_markup=admin_keyboard())
-    return ADMIN_MENU
+async def cb_book(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    book_id = int(query.data.split(":")[1])
+    with get_conn() as conn:
+        row = conn.execute("SELECT title, file_id FROM books WHERE id=%s", (book_id,)).fetchone()
+    if row:
+        await query.message.reply_document(document=row[1], filename=f"{row[0]}.pdf")
 
 
-# ─── Admin Menu ────────────────────────────────────────────────────────────
+# ─── 📝 Lyrics ─────────────────────────────────────────────────────────────────
 
-async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-
-    if text == "🔙 ወደ ዋና ምናሌ":
-        await update.message.reply_text("ወደ ዋና ምናሌ ተመልሰዋል።", reply_markup=main_keyboard())
-        return MAIN_MENU
-    elif text == "➕ መዝሙር ጨምር":
-        await update.message.reply_text("🎵 የዘፈኑን ስም ይፃፉ:", reply_markup=back_keyboard())
-        return ADMIN_ADD_SONG
-    elif text == "➕ Book ጨምር":
-        await update.message.reply_text("📖 የመጽሐፉን ስም ይፃፉ:", reply_markup=back_keyboard())
-        return ADMIN_ADD_BOOK
-    elif text == "➕ ግጥም ጨምር":
-        await update.message.reply_text("📝 የግጥሙን ስም ይፃፉ:", reply_markup=back_keyboard())
-        return ADMIN_ADD_LYRICS
-    elif text == "➕ አዳራሻ ጨምር":
-        await update.message.reply_text("🏛 ጽሑፍ፣ ፎቶ ወይም ቪዲዮ ይላኩ:", reply_markup=back_keyboard())
-        return ADMIN_ADD_HALL
-    elif text == "📋 አስተያየቶች":
-        with get_db() as conn:
-            feedbacks = conn.execute("SELECT * FROM feedback ORDER BY sent_at DESC LIMIT 20").fetchall()
-        if not feedbacks:
-            await update.message.reply_text("😔 ምንም አስተያየት የለም።", reply_markup=admin_keyboard())
-        else:
-            await update.message.reply_text(f"📋 *{len(feedbacks)} አስተያየቶች:*", parse_mode="Markdown")
-            for fb in feedbacks:
-                replied = "✅" if fb["replied"] else "⏳"
-                username_str = f"@{fb['username']}" if fb["username"] else "—"
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ መልስ ላክ", callback_data=f"reply_{fb['id']}_{fb['user_id']}")]
-                ]) if not fb["replied"] else None
-                await update.message.reply_text(
-                    f"{replied} *{fb['first_name']}* ({username_str})\n`{fb['message']}`",
-                    parse_mode="Markdown", reply_markup=keyboard
-                )
-        return ADMIN_MENU
-    elif text == "📨 ለሁሉም ላክ":
-        await update.message.reply_text("📨 ለሁሉም ተጠቃሚዎች የሚላከውን መልእክት ይፃፉ:", reply_markup=back_keyboard())
-        return ADMIN_BROADCAST
-
-    return ADMIN_MENU
+async def menu_lyrics(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, title FROM lyrics ORDER BY id DESC LIMIT 20").fetchall()
+    if not rows:
+        await update.message.reply_text("📝 ምንም ግጥም አልተጨመረም።")
+        return
+    buttons = [[InlineKeyboardButton(r[1], callback_data=f"lyric:{r[0]}")] for r in rows]
+    await update.message.reply_text("📝 የመዝሙር ግጥሞች:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
-# ─── Admin Add Song ────────────────────────────────────────────────────────
-
-async def admin_add_song_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text == "🔙 ተመለስ":
-        await update.message.reply_text("ተሰርዟል።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    context.user_data["song_title"] = update.message.text
-    await update.message.reply_text("🎵 አሁን ኦዲዮውን ይላኩ:")
-    return ADMIN_ADD_SONG_AUDIO
-
-
-async def admin_add_song_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text and update.message.text == "🔙 ተመለስ":
-        await update.message.reply_text("ተሰርዟል።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    if not update.message.audio and not update.message.voice:
-        await update.message.reply_text("❌ እባክዎ ኦዲዮ ፋይል ይላኩ።")
-        return ADMIN_ADD_SONG_AUDIO
-    file_id = update.message.audio.file_id if update.message.audio else update.message.voice.file_id
-    title = context.user_data.get("song_title", "ያልታወቀ")
-    with get_db() as conn:
-        conn.execute("INSERT INTO songs (title, file_id) VALUES (%s, %s)", (title, file_id))
-        conn.commit()
-    await update.message.reply_text(f"✅ '{title}' ተጨምሯል!", reply_markup=admin_keyboard())
-    return ADMIN_MENU
+async def cb_lyric(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lyric_id = int(query.data.split(":")[1])
+    with get_conn() as conn:
+        row = conn.execute("SELECT title, file_id FROM lyrics WHERE id=%s", (lyric_id,)).fetchone()
+    if row:
+        await query.message.reply_photo(photo=row[1], caption=row[0])
 
 
-# ─── Admin Add Book ────────────────────────────────────────────────────────
+# ─── 🏛 Hall ───────────────────────────────────────────────────────────────────
 
-async def admin_add_book_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text == "🔙 ተመለስ":
-        await update.message.reply_text("ተሰርዟል።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    context.user_data["book_title"] = update.message.text
-    await update.message.reply_text("📖 አሁን PDF ፋይሉን ይላኩ:")
-    return ADMIN_ADD_BOOK_FILE
-
-
-async def admin_add_book_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text and update.message.text == "🔙 ተመለስ":
-        await update.message.reply_text("ተሰርዟል።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    if not update.message.document:
-        await update.message.reply_text("❌ እባክዎ PDF ፋይል ይላኩ።")
-        return ADMIN_ADD_BOOK_FILE
-    file_id = update.message.document.file_id
-    title = context.user_data.get("book_title", "ያልታወቀ")
-    with get_db() as conn:
-        conn.execute("INSERT INTO books (title, file_id) VALUES (%s, %s)", (title, file_id))
-        conn.commit()
-    await update.message.reply_text(f"✅ '{title}' ተጨምሯል!", reply_markup=admin_keyboard())
-    return ADMIN_MENU
-
-
-# ─── Admin Add Lyrics ──────────────────────────────────────────────────────
-
-async def admin_add_lyrics_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text == "🔙 ተመለስ":
-        await update.message.reply_text("ተሰርዟል።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    context.user_data["lyrics_title"] = update.message.text
-    await update.message.reply_text("📝 አሁን የግጥሙን ፎቶ ይላኩ:")
-    return ADMIN_ADD_LYRICS_PHOTO
-
-
-async def admin_add_lyrics_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text and update.message.text == "🔙 ተመለስ":
-        await update.message.reply_text("ተሰርዟል።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    if not update.message.photo:
-        await update.message.reply_text("❌ እባክዎ ፎቶ ይላኩ።")
-        return ADMIN_ADD_LYRICS_PHOTO
-    file_id = update.message.photo[-1].file_id
-    title = context.user_data.get("lyrics_title", "ያልታወቀ")
-    with get_db() as conn:
-        conn.execute("INSERT INTO lyrics (title, file_id) VALUES (%s, %s)", (title, file_id))
-        conn.commit()
-    await update.message.reply_text(f"✅ '{title}' ተጨምሯል!", reply_markup=admin_keyboard())
-    return ADMIN_MENU
-
-
-# ─── Admin Add Hall ────────────────────────────────────────────────────────
-
-async def admin_add_hall_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text and update.message.text == "🔙 ተመለስ":
-        await update.message.reply_text("ተሰርዟል።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    with get_db() as conn:
-        if update.message.photo:
-            file_id = update.message.photo[-1].file_id
-            caption = update.message.caption or ""
-            conn.execute("INSERT INTO hall_posts (caption, file_id, file_type) VALUES (%s, %s, %s)", (caption, file_id, "photo"))
-        elif update.message.video:
-            file_id = update.message.video.file_id
-            caption = update.message.caption or ""
-            conn.execute("INSERT INTO hall_posts (caption, file_id, file_type) VALUES (%s, %s, %s)", (caption, file_id, "video"))
-        elif update.message.text:
-            conn.execute("INSERT INTO hall_posts (content, file_type) VALUES (%s, %s)", (update.message.text, "text"))
-        else:
-            await update.message.reply_text("❌ ጽሑፍ፣ ፎቶ ወይም ቪዲዮ ብቻ ነው የሚቀበለው።")
-            return ADMIN_ADD_HALL
-        conn.commit()
-    await update.message.reply_text("✅ ተጨምሯል!", reply_markup=admin_keyboard())
-    return ADMIN_MENU
-
-
-# ─── Admin Broadcast ───────────────────────────────────────────────────────
-
-async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == "🔙 ተመለስ":
-        await update.message.reply_text("ተሰርዟል።", reply_markup=admin_keyboard())
-        return ADMIN_MENU
-    with get_db() as conn:
-        users = conn.execute("SELECT id FROM users").fetchall()
-    sent = failed = 0
-    for user in users:
+async def menu_hall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT caption, media_type, file_id FROM hall_posts ORDER BY id DESC LIMIT 5"
+        ).fetchall()
+    if not rows:
+        await update.message.reply_text("🏛 ምንም ልጥፍ አልተጨመረም።")
+        return
+    for caption, mtype, fid in rows:
         try:
-            await context.bot.send_message(chat_id=user["id"], text=text)
+            if mtype == "photo":
+                await update.message.reply_photo(photo=fid, caption=caption)
+            elif mtype == "video":
+                await update.message.reply_video(video=fid, caption=caption)
+            else:
+                await update.message.reply_text(caption or "🏛 አዳራሻችን")
+        except Exception as e:
+            logger.warning(f"hall post send error: {e}")
+
+
+# ─── 💬 Feedback ───────────────────────────────────────────────────────────────
+
+async def menu_feedback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("💬 አስተያየትዎን ያስፍሩ:")
+    return FEEDBACK_TEXT
+
+
+async def receive_feedback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO feedback (user_id, username, message) VALUES (%s, %s, %s)",
+            (user.id, user.username, text)
+        )
+        conn.commit()
+    await update.message.reply_text("✅ አስተያየትዎ ተቀብሏል። ለዚህ ቦት አመሰግናለሁ!")
+
+    # Forward to admin with reply button
+    keyboard = [[InlineKeyboardButton("↩ መልስ ስጥ", callback_data=f"reply:{user.id}")]]
+    name = user.first_name or user.username or str(user.id)
+    await ctx.bot.send_message(
+        ADMIN_ID,
+        f"📨 አስተያየት ከ {name} (@{user.username}):\n\n{text}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ConversationHandler.END
+
+
+# ─── ❓ Help ───────────────────────────────────────────────────────────────────
+
+async def menu_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "❓ እርዳታ\n\n"
+        "🎵 መዝሙር — የቤተ ክርስቲያን መዝሙሮችን ያዳምጡ\n"
+        "📖 Books — የቤተ ክርስቲያን መጽሐፍቶችን ያንብቡ\n"
+        "📝 ግጥሞች — የመዝሙር ግጥሞች ፎቶ\n"
+        "🏛 አዳራሻችን — የቤተ ክርስቲያን አዳራሽ መረጃ\n"
+        "💬 አስተያየት — አስተያየትዎን ይላኩ\n\n"
+        "ለጥያቄ አስተዳዳሪውን ያናግሩ።"
+    )
+
+
+# ─── Admin panel ───────────────────────────────────────────────────────────────
+
+ADMIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["➕ መዝሙር ጨምር", "➕ Book ጨምር"],
+        ["➕ ግጥም ጨምር",   "➕ Hall ልጥፍ ጨምር"],
+        ["📋 Feedbacks ይመልከቱ", "📢 Broadcast"],
+        ["🔙 ወደ ዋና ምናሌ"],
+    ],
+    resize_keyboard=True
+)
+
+
+async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ ይህ ትዕዛዝ ለአስተዳዳሪ ብቻ ነው።")
+        return ConversationHandler.END
+    await update.message.reply_text("🔧 Admin Panel:", reply_markup=ADMIN_KEYBOARD)
+    return ADMIN_MENU
+
+
+async def admin_menu_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "➕ መዝሙር ጨምር":
+        await update.message.reply_text("🎵 የመዝሙሩን ስም ያስፍሩ:")
+        return ADD_SONG_TITLE
+    elif text == "➕ Book ጨምር":
+        await update.message.reply_text("📖 የመጽሐፉን ስም ያስፍሩ:")
+        return ADD_BOOK_TITLE
+    elif text == "➕ ግጥም ጨምር":
+        await update.message.reply_text("📝 የግጥሙን ስም ያስፍሩ:")
+        return ADD_LYRIC_TITLE
+    elif text == "➕ Hall ልጥፍ ጨምር":
+        await update.message.reply_text("🏛 የልጥፉን ካፕሽን ያስፍሩ (ወይም skip ይላኩ):")
+        return ADD_HALL_CAPTION
+    elif text == "📋 Feedbacks ይመልከቱ":
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT username, message, sent_at FROM feedback ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+        if not rows:
+            await update.message.reply_text("ምንም አስተያየት የለም።")
+        else:
+            for username, message, sent_at in rows:
+                await update.message.reply_text(f"@{username}: {message}\n({sent_at})")
+        return ADMIN_MENU
+    elif text == "📢 Broadcast":
+        await update.message.reply_text("📢 ለሁሉም ተጠቃሚዎች የሚላኩ ልጥፍ ያስፍሩ:")
+        return BROADCAST_TEXT
+    elif text == "🔙 ወደ ዋና ምናሌ":
+        await update.message.reply_text("ዋና ምናሌ:", reply_markup=MAIN_MENU)
+        return ConversationHandler.END
+    return ADMIN_MENU
+
+
+# Add song
+async def add_song_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["song_title"] = update.message.text
+    await update.message.reply_text("🎵 አሁን የድምፅ ፋይሉን ይላኩ:")
+    return ADD_SONG_FILE
+
+async def add_song_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message.audio and not update.message.voice:
+        await update.message.reply_text("⚠️ እባክዎ ድምፅ ፋይል ይላኩ።")
+        return ADD_SONG_FILE
+    fid = (update.message.audio or update.message.voice).file_id
+    title = ctx.user_data.get("song_title", "untitled")
+    with get_conn() as conn:
+        conn.execute("INSERT INTO songs (title, file_id) VALUES (%s, %s)", (title, fid))
+        conn.commit()
+    await update.message.reply_text(f"✅ '{title}' ተጨምሯል!", reply_markup=ADMIN_KEYBOARD)
+    return ADMIN_MENU
+
+
+# Add book
+async def add_book_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["book_title"] = update.message.text
+    await update.message.reply_text("📖 አሁን PDF ፋይሉን ይላኩ:")
+    return ADD_BOOK_FILE
+
+async def add_book_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message.document:
+        await update.message.reply_text("⚠️ እባክዎ ሰነድ ፋይል ይላኩ።")
+        return ADD_BOOK_FILE
+    fid = update.message.document.file_id
+    title = ctx.user_data.get("book_title", "untitled")
+    with get_conn() as conn:
+        conn.execute("INSERT INTO books (title, file_id) VALUES (%s, %s)", (title, fid))
+        conn.commit()
+    await update.message.reply_text(f"✅ '{title}' ተጨምሯል!", reply_markup=ADMIN_KEYBOARD)
+    return ADMIN_MENU
+
+
+# Add lyric
+async def add_lyric_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["lyric_title"] = update.message.text
+    await update.message.reply_text("📝 አሁን የግጥሙ ፎቶ ይላኩ:")
+    return ADD_LYRIC_FILE
+
+async def add_lyric_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo:
+        await update.message.reply_text("⚠️ እባክዎ ፎቶ ይላኩ።")
+        return ADD_LYRIC_FILE
+    fid = update.message.photo[-1].file_id
+    title = ctx.user_data.get("lyric_title", "untitled")
+    with get_conn() as conn:
+        conn.execute("INSERT INTO lyrics (title, file_id) VALUES (%s, %s)", (title, fid))
+        conn.commit()
+    await update.message.reply_text(f"✅ '{title}' ተጨምሯል!", reply_markup=ADMIN_KEYBOARD)
+    return ADMIN_MENU
+
+
+# Add hall post
+async def add_hall_caption(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    ctx.user_data["hall_caption"] = "" if text.lower() == "skip" else text
+    await update.message.reply_text("🏛 አሁን ፎቶ ወይም ቪዲዮ ይላኩ (ወይም skip ላክ):")
+    return ADD_HALL_MEDIA
+
+async def add_hall_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    caption = ctx.user_data.get("hall_caption", "")
+    text = update.message.text or ""
+    if text.lower() == "skip":
+        mtype, fid = "text", None
+    elif update.message.photo:
+        mtype, fid = "photo", update.message.photo[-1].file_id
+    elif update.message.video:
+        mtype, fid = "video", update.message.video.file_id
+    else:
+        await update.message.reply_text("⚠️ ፎቶ ወይም ቪዲዮ ይላኩ፣ ወይም skip ይፃፉ።")
+        return ADD_HALL_MEDIA
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO hall_posts (caption, media_type, file_id) VALUES (%s, %s, %s)",
+            (caption, mtype, fid)
+        )
+        conn.commit()
+    await update.message.reply_text("✅ Hall ልጥፍ ተጨምሯል!", reply_markup=ADMIN_KEYBOARD)
+    return ADMIN_MENU
+
+
+# Broadcast
+async def broadcast_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    with get_conn() as conn:
+        users = conn.execute("SELECT id FROM users").fetchall()
+    sent, failed = 0, 0
+    for (uid,) in users:
+        try:
+            await ctx.bot.send_message(uid, f"📢 {text}")
             sent += 1
         except Exception:
             failed += 1
     await update.message.reply_text(
-        f"✅ ተልኳል!\n📤 ደርሷል: {sent}\n❌ አልደረሰም: {failed}",
-        reply_markup=admin_keyboard()
+        f"✅ Broadcast ተልኳል!\nተሳካ: {sent} | አልተሳካም: {failed}",
+        reply_markup=ADMIN_KEYBOARD
     )
     return ADMIN_MENU
 
 
-# ─── Admin Command ─────────────────────────────────────────────────────────
+# Reply to feedback sender
+async def cb_reply_to_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if update.effective_user.id != ADMIN_ID:
+        return
+    target_id = int(query.data.split(":")[1])
+    ctx.user_data["reply_target"] = target_id
+    await query.message.reply_text("↩ መልስዎን ያስፍሩ:")
+    return REPLY_TO_USER
 
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ ይህ ትዕዛዝ ለአስተዳዳሪዎች ብቻ ነው።")
-        return MAIN_MENU
-    await update.message.reply_text("👨‍💼 *አስተዳዳሪ ምናሌ*", parse_mode="Markdown", reply_markup=admin_keyboard())
-    return ADMIN_MENU
+async def send_reply_to_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    target_id = ctx.user_data.get("reply_target")
+    if target_id:
+        try:
+            await ctx.bot.send_message(target_id, f"📨 ከአስተዳዳሪ:\n\n{update.message.text}")
+            await update.message.reply_text("✅ መልስ ተልኳል!")
+        except Exception as e:
+            await update.message.reply_text(f"❌ መልስ አልተላከም: {e}")
+    return ConversationHandler.END
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ተሰርዟል።", reply_markup=main_keyboard())
-    return MAIN_MENU
+# Cancel
+async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ ተሰርዟል።", reply_markup=MAIN_MENU)
+    return ConversationHandler.END
 
 
-# ─── Main ──────────────────────────────────────────────────────────────────
+# ─── aiohttp web server (required by Render free tier) ────────────────────────
 
-def main():
+async def health(request):
+    return web.Response(text="OK - Awada bot running")
+
+async def start_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/ping", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"[web] Listening on port {port}")
+
+
+# ─── Main ──────────────────────────────────────────────────────────────────────
+
+async def run():
+    # Start web server first so Render sees an open port
+    await start_web_server()
+
     init_db()
 
-    # Start ping server in background thread
-    threading.Thread(target=start_ping_server, daemon=True).start()
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # Main menu handlers (plain text buttons)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Regex("^🎵 መዝሙር$"), menu_songs))
+    app.add_handler(MessageHandler(filters.Regex("^📖 Books$"), menu_books))
+    app.add_handler(MessageHandler(filters.Regex("^📝 የመዝሙር ግጥሞች$"), menu_lyrics))
+    app.add_handler(MessageHandler(filters.Regex("^🏛 አዳራሻችን$"), menu_hall))
+    app.add_handler(MessageHandler(filters.Regex("^❓ Help$"), menu_help))
 
-    conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CommandHandler("admin", admin_command),
-        ],
+    # Inline button callbacks
+    app.add_handler(CallbackQueryHandler(cb_song,  pattern="^song:"))
+    app.add_handler(CallbackQueryHandler(cb_book,  pattern="^book:"))
+    app.add_handler(CallbackQueryHandler(cb_lyric, pattern="^lyric:"))
+
+    # Feedback conversation
+    feedback_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^💬 አስተያየት$"), menu_feedback)],
+        states={FEEDBACK_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_feedback)]},
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(feedback_conv)
+
+    # Admin reply-to-user conversation (callback → reply)
+    reply_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_reply_to_user, pattern="^reply:")],
+        states={REPLY_TO_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_reply_to_user)]},
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(reply_conv)
+
+    # Admin conversation
+    admin_conv = ConversationHandler(
+        entry_points=[CommandHandler("admin", admin_start)],
         states={
-            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)],
-            FEEDBACK_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, feedback_text)],
-            ADMIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_handler)],
-            ADMIN_ADD_SONG: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_song_title)],
-            ADMIN_ADD_SONG_AUDIO: [MessageHandler(filters.AUDIO | filters.VOICE | filters.TEXT, admin_add_song_audio)],
-            ADMIN_ADD_BOOK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_book_title)],
-            ADMIN_ADD_BOOK_FILE: [MessageHandler(filters.Document.ALL | filters.TEXT, admin_add_book_file)],
-            ADMIN_ADD_LYRICS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_lyrics_title)],
-            ADMIN_ADD_LYRICS_PHOTO: [MessageHandler(filters.PHOTO | filters.TEXT, admin_add_lyrics_photo)],
-            ADMIN_ADD_HALL: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.TEXT, admin_add_hall_post)],
-            ADMIN_REPLY_FEEDBACK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_reply)],
-            ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
+            ADMIN_MENU:       [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_handler)],
+            ADD_SONG_TITLE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_song_title)],
+            ADD_SONG_FILE:    [MessageHandler(filters.AUDIO | filters.VOICE, add_song_file)],
+            ADD_BOOK_TITLE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_book_title)],
+            ADD_BOOK_FILE:    [MessageHandler(filters.Document.ALL, add_book_file)],
+            ADD_LYRIC_TITLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, add_lyric_title)],
+            ADD_LYRIC_FILE:   [MessageHandler(filters.PHOTO, add_lyric_file)],
+            ADD_HALL_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_hall_caption)],
+            ADD_HALL_MEDIA:   [MessageHandler(filters.PHOTO | filters.VIDEO | filters.TEXT, add_hall_media)],
+            BROADCAST_TEXT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_text)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
     )
+    app.add_handler(admin_conv)
 
-    app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(admin_reply_callback, pattern="^reply_"))
-
-    print("Bot is running...")
-    app.run_polling()
+    # Run bot using async context manager (works with Python 3.14, no get_event_loop)
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info("Bot is running. Press Ctrl+C to stop.")
+        # Keep running until cancelled
+        await asyncio.Event().wait()
+        await app.updater.stop()
+        await app.stop()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(run())
