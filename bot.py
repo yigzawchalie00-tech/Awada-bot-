@@ -8,6 +8,7 @@ Runs on Render free tier (web service) using aiohttp for the HTTP port + python-
 import asyncio
 import os
 import logging
+import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
 import psycopg
@@ -128,6 +129,12 @@ def register_user(user):
             conn.commit()
     except Exception as e:
         logger.warning(f"register_user failed: {e}")
+
+
+async def auto_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Silently register any user who sends any message — runs before all handlers."""
+    if update.effective_user:
+        register_user(update.effective_user)
 
 
 # ─── /start ────────────────────────────────────────────────────────────────────
@@ -563,6 +570,21 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def health(request):
     return web.Response(text="OK - Awada bot running")
 
+async def self_ping_loop():
+    """Ping own /ping endpoint every 10 minutes to prevent Render from sleeping."""
+    port = int(os.environ.get("PORT", 10000))
+    url = f"http://0.0.0.0:{port}/ping"
+    await asyncio.sleep(30)  # wait for web server to start first
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    logger.info(f"[self-ping] {resp.status}")
+        except Exception as e:
+            logger.warning(f"[self-ping] failed: {e}")
+        await asyncio.sleep(600)  # every 10 minutes
+
+
 async def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     app = web.Application()
@@ -580,10 +602,14 @@ async def start_web_server():
 async def run():
     # Start web server first so Render sees an open port
     await start_web_server()
+    asyncio.create_task(self_ping_loop())
 
     init_db()
 
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Auto-register every user silently on any message (runs first, non-blocking)
+    app.add_handler(MessageHandler(filters.ALL, auto_register), group=-1)
 
     # Main menu handlers (plain text buttons)
     app.add_handler(CommandHandler("start", start))
