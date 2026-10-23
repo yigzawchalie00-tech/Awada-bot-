@@ -221,7 +221,7 @@ async def menu_hall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "SELECT caption, media_type, file_id FROM hall_posts ORDER BY id DESC LIMIT 5"
         ).fetchall()
     if not rows:
-        await update.message.reply_text("🏛 ምንም ልጥፍ አልተጨመረም።")
+        await update.message.reply_text("🏛 ምንም ነገር አልተጨመረም።")
         return
     for caption, mtype, fid in rows:
         try:
@@ -271,7 +271,7 @@ async def menu_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "❓ እርዳታ\n\n"
         "🎵 መዝሙር — የቤተ ክርስቲያን መዝሙሮችን ያዳምጡ\n"
         "📖 Books — የቤተ ክርስቲያን መጽሐፍቶችን ያንብቡ\n"
-        "📝 ግጥሞች — የመዝሙር ግጥሞች ፎቶ\n"
+        "📝 ግጥሞች — የመዝሙር ግጥሞችን በፁሕፍ እና በፎቶ\n"
         "🏛 አዳራሻችን — የቤተ ክርስቲያን አዳራሽ መረጃ\n"
         "💬 አስተያየት — አስተያየትዎን ይላኩ\n\n"
         "ለጥያቄ አስተዳዳሪውን ያናግሩ።"
@@ -283,10 +283,10 @@ async def menu_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 ADMIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["➕ መዝሙር ጨምር",      "➕ Book ጨምር"],
-        ["📦 Bulk መዝሙር ጨምር", "📦 Bulk Books ጨምር"],
-        ["➕ ግጥም ጨምር",       "➕ Hall ልጥፍ ጨምር"],
+        ["📦 Bulk መዝሙር ጨምር", "📦 ብዙ መፃህፍት ጨምር"],
+        ["➕ የመዝሙር ግጥም ጨምር",       "➕ about Hall ፖስት "],
         ["📋 Feedbacks ይመልከቱ","📢 Broadcast"],
-        ["🔙 ወደ ዋና ምናሌ"],
+        ["🔙 ወደ ዋና ማውጫ"],
     ],
     resize_keyboard=True
 )
@@ -582,7 +582,7 @@ async def self_ping_loop():
                     logger.info(f"[self-ping] {resp.status}")
         except Exception as e:
             logger.warning(f"[self-ping] failed: {e}")
-        await asyncio.sleep(600)  # every 10 minutes
+        await asyncio.sleep(240)  # every 4 minutes
 
 
 async def start_web_server():
