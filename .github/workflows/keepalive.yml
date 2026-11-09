@@ -3,7 +3,7 @@ name: Keepalive Ping
 on:
   schedule:
     - cron: "*/5 * * * *"   # every 5 minutes
-  workflow_dispatch:          # allow manual trigger
+  workflow_dispatch:
 
 jobs:
   ping:
@@ -12,3 +12,18 @@ jobs:
       - name: Ping Render service
         run: |
           curl -sSf "https://awada-bot.onrender.com/ping" || true
+          curl -sSf "https://awada-bot.onrender.com/" || true
+
+  keep-repo-active:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 0 * * 0'  # weekly on Sunday
+    steps:
+      - uses: actions/checkout@v3
+      - name: Keep repo active
+        run: |
+          echo "$(date)" > .last-ping
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git add .last-ping
+          git commit -m "keepalive: $(date)" || true
+          git push
