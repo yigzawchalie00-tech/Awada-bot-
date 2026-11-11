@@ -364,7 +364,7 @@ ADMIN_KEYBOARD = ReplyKeyboardMarkup(
         ["📦 Bulk መዝሙር ጨምር", "📦 Bulk Books ጨምር"],
         ["➕ ግጥም ጨምር",       "➕ Hall ልጥፍ ጨምር"],
         ["📋 Feedbacks ይመልከቱ","📢 Broadcast"],
-        ["🔙 ወደ ዋና ምናሌ"],
+        ["👥 Members ይመልከቱ",  "🔙 ወደ ዋና ምናሌ"],
     ],
     resize_keyboard=True
 )
@@ -414,6 +414,20 @@ async def admin_menu_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             for username, message, sent_at in rows:
                 await update.message.reply_text(f"@{username}: {message}\n({sent_at})")
+        return ADMIN_MENU
+    elif text == "👥 Members ይመልከቱ":
+        with get_conn() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            rows = conn.execute(
+                "SELECT first_name, username, joined_at FROM users ORDER BY joined_at DESC LIMIT 20"
+            ).fetchall()
+        lines = [f"👥 አባላት ({total} ጠቅላላ) — የቅርብ ጊዜ 20:\n"]
+        for first_name, username, joined_at in rows:
+            name = first_name or username or "?"
+            uname = f"@{username}" if username else "—"
+            date_str = joined_at.strftime("%Y-%m-%d %H:%M") if joined_at else "?"
+            lines.append(f"• {name} ({uname}) — {date_str}")
+        await update.message.reply_text("\n".join(lines))
         return ADMIN_MENU
     elif text == "📢 Broadcast":
         await update.message.reply_text("📢 ለሁሉም ተጠቃሚዎች የሚላኩ ልጥፍ ያስፍሩ:")
