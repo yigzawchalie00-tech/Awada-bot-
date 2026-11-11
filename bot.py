@@ -149,14 +149,54 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── 🎵 Songs ──────────────────────────────────────────────────────────────────
 
-async def menu_songs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+PAGE_SIZE = 10
+
+async def menu_songs(update: Update, ctx: ContextTypes.DEFAULT_TYPE, page: int = 0):
     with get_conn() as conn:
-        rows = conn.execute("SELECT id, title FROM songs ORDER BY id DESC LIMIT 20").fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, title FROM songs ORDER BY title ASC LIMIT %s OFFSET %s",
+            (PAGE_SIZE, page * PAGE_SIZE)
+        ).fetchall()
     if not rows:
         await update.message.reply_text("🎵 ምንም መዝሙር አልተጨመረም።")
         return
     buttons = [[InlineKeyboardButton(r[1], callback_data=f"song:{r[0]}")] for r in rows]
-    await update.message.reply_text("🎵 መዝሙሮች:", reply_markup=InlineKeyboardMarkup(buttons))
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ ቀዳሚ", callback_data=f"songs_page:{page-1}"))
+    if (page + 1) * PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("ቀጣይ ➡", callback_data=f"songs_page:{page+1}"))
+    if nav:
+        buttons.append(nav)
+    await update.message.reply_text(
+        f"🎵 መዝሙሮች ({page*PAGE_SIZE+1}-{min((page+1)*PAGE_SIZE, total)} / {total}):",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+async def cb_songs_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[1])
+    with get_conn() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, title FROM songs ORDER BY title ASC LIMIT %s OFFSET %s",
+            (PAGE_SIZE, page * PAGE_SIZE)
+        ).fetchall()
+    buttons = [[InlineKeyboardButton(r[1], callback_data=f"song:{r[0]}")] for r in rows]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ ቀዳሚ", callback_data=f"songs_page:{page-1}"))
+    if (page + 1) * PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("ቀጣይ ➡", callback_data=f"songs_page:{page+1}"))
+    if nav:
+        buttons.append(nav)
+    await query.edit_message_text(
+        f"🎵 መዝሙሮች ({page*PAGE_SIZE+1}-{min((page+1)*PAGE_SIZE, total)} / {total}):",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 async def cb_song(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -171,14 +211,52 @@ async def cb_song(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── 📖 Books ──────────────────────────────────────────────────────────────────
 
-async def menu_books(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def menu_books(update: Update, ctx: ContextTypes.DEFAULT_TYPE, page: int = 0):
     with get_conn() as conn:
-        rows = conn.execute("SELECT id, title FROM books ORDER BY id DESC LIMIT 20").fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, title FROM books ORDER BY title ASC LIMIT %s OFFSET %s",
+            (PAGE_SIZE, page * PAGE_SIZE)
+        ).fetchall()
     if not rows:
         await update.message.reply_text("📖 ምንም መጽሐፍ አልተጨመረም።")
         return
     buttons = [[InlineKeyboardButton(r[1], callback_data=f"book:{r[0]}")] for r in rows]
-    await update.message.reply_text("📖 መጽሐፍቶች:", reply_markup=InlineKeyboardMarkup(buttons))
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ ቀዳሚ", callback_data=f"books_page:{page-1}"))
+    if (page + 1) * PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("ቀጣይ ➡", callback_data=f"books_page:{page+1}"))
+    if nav:
+        buttons.append(nav)
+    await update.message.reply_text(
+        f"📖 መጽሐፍቶች ({page*PAGE_SIZE+1}-{min((page+1)*PAGE_SIZE, total)} / {total}):",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+async def cb_books_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[1])
+    with get_conn() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, title FROM books ORDER BY title ASC LIMIT %s OFFSET %s",
+            (PAGE_SIZE, page * PAGE_SIZE)
+        ).fetchall()
+    buttons = [[InlineKeyboardButton(r[1], callback_data=f"book:{r[0]}")] for r in rows]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ ቀዳሚ", callback_data=f"books_page:{page-1}"))
+    if (page + 1) * PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("ቀጣይ ➡", callback_data=f"books_page:{page+1}"))
+    if nav:
+        buttons.append(nav)
+    await query.edit_message_text(
+        f"📖 መጽሐፍቶች ({page*PAGE_SIZE+1}-{min((page+1)*PAGE_SIZE, total)} / {total}):",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 async def cb_book(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -221,7 +299,7 @@ async def menu_hall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "SELECT caption, media_type, file_id FROM hall_posts ORDER BY id DESC LIMIT 5"
         ).fetchall()
     if not rows:
-        await update.message.reply_text("🏛 ምንም ነገር አልተጨመረም።")
+        await update.message.reply_text("🏛 ምንም ልጥፍ አልተጨመረም።")
         return
     for caption, mtype, fid in rows:
         try:
@@ -271,7 +349,7 @@ async def menu_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "❓ እርዳታ\n\n"
         "🎵 መዝሙር — የቤተ ክርስቲያን መዝሙሮችን ያዳምጡ\n"
         "📖 Books — የቤተ ክርስቲያን መጽሐፍቶችን ያንብቡ\n"
-        "📝 ግጥሞች — የመዝሙር ግጥሞችን በፁሕፍ እና በፎቶ\n"
+        "📝 ግጥሞች — የመዝሙር ግጥሞች ፎቶ\n"
         "🏛 አዳራሻችን — የቤተ ክርስቲያን አዳራሽ መረጃ\n"
         "💬 አስተያየት — አስተያየትዎን ይላኩ\n\n"
         "ለጥያቄ አስተዳዳሪውን ያናግሩ።"
@@ -283,10 +361,10 @@ async def menu_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 ADMIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["➕ መዝሙር ጨምር",      "➕ Book ጨምር"],
-        ["📦 Bulk መዝሙር ጨምር", "📦 ብዙ መፃህፍት ጨምር"],
-        ["➕ የመዝሙር ግጥም ጨምር",       "➕ about Hall ፖስት "],
+        ["📦 Bulk መዝሙር ጨምር", "📦 Bulk Books ጨምር"],
+        ["➕ ግጥም ጨምር",       "➕ Hall ልጥፍ ጨምር"],
         ["📋 Feedbacks ይመልከቱ","📢 Broadcast"],
-        ["🔙 ወደ ዋና ማውጫ"],
+        ["🔙 ወደ ዋና ምናሌ"],
     ],
     resize_keyboard=True
 )
@@ -620,9 +698,11 @@ async def run():
     app.add_handler(MessageHandler(filters.Regex("^❓ Help$"), menu_help))
 
     # Inline button callbacks
-    app.add_handler(CallbackQueryHandler(cb_song,  pattern="^song:"))
-    app.add_handler(CallbackQueryHandler(cb_book,  pattern="^book:"))
-    app.add_handler(CallbackQueryHandler(cb_lyric, pattern="^lyric:"))
+    app.add_handler(CallbackQueryHandler(cb_song,       pattern="^song:"))
+    app.add_handler(CallbackQueryHandler(cb_songs_page, pattern="^songs_page:"))
+    app.add_handler(CallbackQueryHandler(cb_book,       pattern="^book:"))
+    app.add_handler(CallbackQueryHandler(cb_books_page, pattern="^books_page:"))
+    app.add_handler(CallbackQueryHandler(cb_lyric,      pattern="^lyric:"))
 
     # Feedback conversation
     feedback_conv = ConversationHandler(
